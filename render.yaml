@@ -1,0 +1,18 @@
+# Web service on Render. Create it with: Render dashboard > New > Blueprint > this repo.
+# Then set GROQ_API_KEY (a secret) in the service's Environment tab. The service sleeps when idle; the
+# portfolio page wakes it when someone opens the demo.
+services:
+  - type: web
+    name: voice-to-tasks
+    runtime: python
+    plan: free
+    buildCommand: pip install requests
+    startCommand: python -m voicetotasks serve
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: PYTHONPATH
+        value: src
+      - key: GROQ_API_KEY
+        sync: false

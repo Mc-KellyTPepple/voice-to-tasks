@@ -1,0 +1,16 @@
+[project]
+name = "voice-to-tasks"
+version = "0.1.0"
+description = "Speak for 20 seconds, get a transcript, a to-do list and a summary. Whisper speech-to-text, grounded task extraction, and a measured word error rate on LibriSpeech."
+requires-python = ">=3.11"
+dependencies = ["requests>=2.31"]
+
+[project.optional-dependencies]
+eval = ["datasets>=2.19", "soundfile>=0.12", "num2words>=0.5"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

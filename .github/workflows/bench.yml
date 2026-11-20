@@ -1,0 +1,64 @@
+name: Word error rate on LibriSpeech
+
+# Sends a fixed random sample of LibriSpeech (CC BY 4.0) test-clean and test-other utterances to the Groq Whisper
+# models, scores the transcripts, and commits the per-utterance results. Resumable: finished utterances are skipped.
+#
+# One-time setup: add the repository SECRET GROQ_API_KEY (from console.groq.com/keys). Run it by hand from the Actions tab.
+
+on:
+  workflow_dispatch:
+    inputs:
+      configs:
+        description: "Comma-separated: turbo-clean,turbo-other,v3-clean,v3-other"
+        default: "turbo-clean,turbo-other,v3-clean,v3-other"
+      n:
+        description: "Utterances per configuration"
+        default: "50"
+      seed:
+        description: "Sample seed"
+        default: "1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bench
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      PYTHONPATH: src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check setup
+        run: '[ -n "$GROQ_API_KEY" ] || { echo "::error::Add the GROQ_API_KEY repository secret."; exit 1; }'
+      - run: pip install -e ".[eval]"
+      - name: Run benchmark
+        run: |
+          python -m voicetotasks bench --configs "${{ inputs.configs }}" --n "${{ inputs.n }}" --seed "${{ inputs.seed }}"
+      - name: Report
+        if: always()
+        run: |
+          python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          p = pathlib.Path("evals/results/summary.json")
+          s = json.loads(p.read_text()) if p.exists() else {}
+          print("| config | clips | words | WER | 95% CI | median latency |\n|---|---|---|---|---|---|")
+          for k, v in s.items():
+              print(f"| {k} | {v['utterances']} | {v['words']} | {v['wer']}% | {v['ci_lo']}–{v['ci_hi']} | {v['median_latency']}s |")
+          PY
+      - name: Commit results
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A evals/results
+          git diff --cached --quiet || git commit -m "Benchmark results"
+          git pull --rebase -X theirs && git push
