@@ -9,7 +9,7 @@ from pathlib import Path
 from voicetotasks import bench
 from voicetotasks.groq import Groq, GroqError
 from voicetotasks.server import App, Limits, Server, make_handler, segment_info, sniff_audio, speech_found
-from voicetotasks.tasks import clean
+from voicetotasks.tasks import clean, clean_notes
 from voicetotasks.wer import bootstrap_ci, edit_distance, normalize, utterance_errors
 
 WEBM = b"\x1a\x45\xdf\xa3" + b"\x00" * 64
@@ -30,12 +30,17 @@ class FakeClient:
             {"task": "Call Sam", "owner": None, "due": "tomorrow", "quote": "call Sam tomorrow"},
             {"task": "Send the invoice", "owner": "Priya", "due": "by Friday", "quote": "send the invoice by Friday"}]}
         self.calls = 0
+        self.meeting = {"summary": "Launch moved.", "decisions": [{"text": "Launch moves to March", "quote": "we agreed to move the launch to March"}],
+                        "actions": [{"task": "Update the roadmap", "owner": "Dana", "due": "Monday", "quote": "Dana will update the roadmap by Monday", "urgent_words": None}],
+                        "questions": [{"text": "Who owns the budget?", "quote": "nobody has the budget yet"}, {"text": "Invented", "quote": "something never said"}]}
 
     def transcribe(self, audio, filename, mime, model="m", language="en"):
         self.calls += 1
         return {"text": self.text, "duration": 7.4, "segments": self.segs if self.segs is not None else [{"no_speech_prob": 0.01}]}
 
     def chat_json(self, messages, models=None, max_tokens=1200):
+        if "meeting recap" in messages[0]["content"]:
+            return self.meeting, "openai/gpt-oss-20b", {"total_tokens": 400}
         return self.tasks, "openai/gpt-oss-20b", {"total_tokens": 321}
 
 
@@ -102,6 +107,38 @@ class AdvancedTests(unittest.TestCase):
         self.assertEqual([(s["text"], s["low"]) for s in segs], [("hello there", False), ("mumbled bit", True)])
 
 
+class MeetingTests(unittest.TestCase):
+    T = "we agreed to move the launch to March. Dana will update the roadmap by Monday. nobody has the budget yet"
+
+    def test_notes_are_grounded_individually(self):
+        c = FakeClient(text=self.T)
+        code, out = App(c).tasks_from_text(self.T, "ip", "meeting")
+        self.assertEqual(code, 200)
+        self.assertEqual(out["mode"], "meeting")
+        self.assertEqual(out["decisions"][0]["grounded"], True)
+        self.assertEqual([q["grounded"] for q in out["questions"]], [True, False])
+        self.assertEqual((out["tasks"][0]["owner"], out["tasks"][0]["due"]), ("Dana", "Monday"))
+
+    def test_mode_reaches_the_audio_route_and_defaults_to_reminders(self):
+        self.assertEqual(App(FakeClient(text=self.T)).transcribe(WEBM, "a", "meeting")[1]["mode"], "meeting")
+        self.assertEqual(App(FakeClient()).transcribe(WEBM, "b")[1]["mode"], "reminders")
+
+    def test_bad_notes_do_not_raise(self):
+        self.assertEqual(clean_notes({"decisions": "x", "questions": [1, {"text": ""}]}, "t"), {"decisions": [], "questions": []})
+
+    def test_http_mode_parameter(self):
+        srv = Server(("127.0.0.1", 0), make_handler(App(FakeClient(text=self.T))))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            c = HTTPConnection("127.0.0.1", srv.server_address[1])
+            c.request("POST", "/transcribe?mode=meeting", WEBM, {"Content-Type": "audio/webm"})
+            self.assertEqual(json.loads(c.getresponse().read())["mode"], "meeting")
+            c.request("POST", "/tasks", json.dumps({"text": "we agreed on things today ok", "mode": "meeting"}), {"Content-Type": "application/json"})
+            self.assertEqual(json.loads(c.getresponse().read())["mode"], "meeting")
+        finally:
+            srv.shutdown()
+
+
 class SniffTests(unittest.TestCase):
     def test_types(self):
         self.assertEqual(sniff_audio(WEBM)[1], "audio/webm")
@@ -132,7 +169,7 @@ class AppTests(unittest.TestCase):
         app = App(c, Limits(per_ip_per_hour=1))
         self.assertEqual(app.transcribe(b"", "ip")[0], 400)
         self.assertEqual(app.transcribe(b"not audio at all", "ip")[0], 400)
-        self.assertEqual(app.transcribe(WEBM + b"0" * 1_600_000, "ip")[0], 413)
+        self.assertEqual(app.transcribe(WEBM + b"0" * 3_100_000, "ip")[0], 413)
         self.assertEqual(c.calls, 0)
         self.assertEqual(app.transcribe(WEBM, "ip")[0], 200)     # the one allowed call is still available
 

@@ -1,8 +1,8 @@
 """Small HTTP service (standard library only).
 
   GET  /health      liveness
-  POST /transcribe  body = raw audio (webm, ogg, mp4, wav, mp3, flac), up to ~30 s -> transcript, summary, tasks, timings
-  POST /tasks       {"text": "..."} -> summary, tasks (for visitors without a microphone)
+  POST /transcribe[?mode=meeting]  body = raw audio (webm, ogg, mp4, wav, mp3, flac) -> transcript, summary, tasks, timings
+  POST /tasks       {"text": "...", "mode": "reminders"|"meeting"} -> summary, tasks (for visitors without a microphone)
 
 Runs on a small host with a rate-limited key: per-IP and daily limits, a size limit, audio kept in memory only,
 nothing logged. Without GROQ_API_KEY it starts anyway and answers 503 on the two POST routes.
@@ -17,10 +17,15 @@ from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .groq import STT_MODELS, Groq, GroqError
-from .tasks import extract_tasks
+from .tasks import extract_meeting, extract_tasks
 
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "*")
-MAX_AUDIO_BYTES = 1_500_000
+MAX_AUDIO_BYTES = 3_000_000
+MODES = ("reminders", "meeting")
+
+
+def run_mode(client, text: str, mode: str) -> dict:
+    return extract_meeting(client, text) if mode == "meeting" else extract_tasks(client, text)
 MAX_TEXT_CHARS = 4000
 MIN_WORDS = 4
 
@@ -100,13 +105,13 @@ class App:
                if exc.kind == "quota" else "The speech provider returned an error. Try again.")
         return 503, {"error": msg}
 
-    def transcribe(self, audio: bytes, ip: str) -> tuple[int, dict]:
+    def transcribe(self, audio: bytes, ip: str, mode: str = "reminders") -> tuple[int, dict]:
         if self.client is None:
             return self._unconfigured()
         if not audio:
             return 400, {"error": "No audio received."}
         if len(audio) > MAX_AUDIO_BYTES:
-            return 413, {"error": f"Recording too large (max {MAX_AUDIO_BYTES / 1e6:.1f} MB, about 30 seconds)."}
+            return 413, {"error": f"Recording too large (max {MAX_AUDIO_BYTES / 1e6:.0f} MB)."}
         kind = sniff_audio(audio)
         if not kind:
             return 400, {"error": "That does not look like an audio file."}
@@ -123,7 +128,7 @@ class App:
                     return 200, {"transcript": text if speech_found(verbose) else "", "empty": True, "tasks": [], "summary": "",
                                  "note": "I could not hear enough speech. Try again closer to the microphone.",
                                  "seconds": {"transcribe": round(t1 - t0, 1), "tasks": 0, "total": round(t1 - t0, 1)}}
-                result = extract_tasks(self.client, text)
+                result = run_mode(self.client, text, mode)
         except GroqError as exc:
             return self._fail(exc)
         except Exception as exc:   # never leak internals
@@ -136,7 +141,7 @@ class App:
             "seconds": {"transcribe": round(t1 - t0, 1), "tasks": round(t2 - t1, 1), "total": round(t2 - t0, 1)},
         }
 
-    def tasks_from_text(self, text, ip: str) -> tuple[int, dict]:
+    def tasks_from_text(self, text, ip: str, mode: str = "reminders") -> tuple[int, dict]:
         if self.client is None:
             return self._unconfigured()
         if not isinstance(text, str) or len(text.split()) < MIN_WORDS:
@@ -149,7 +154,7 @@ class App:
         t0 = time.monotonic()
         try:
             with self.gate:
-                result = extract_tasks(self.client, text.strip())
+                result = run_mode(self.client, text.strip(), mode)
         except GroqError as exc:
             return self._fail(exc)
         except Exception as exc:
@@ -188,8 +193,10 @@ def make_handler(app: App):
             self._json(200, {"ok": True}) if self.path == "/health" else self._json(404, {"error": "not found"})
 
         def do_POST(self):  # noqa: N802
-            if self.path not in ("/transcribe", "/tasks"):
+            route, _, query = self.path.partition("?")
+            if route not in ("/transcribe", "/tasks"):
                 return self._json(404, {"error": "not found"})
+            mode = "meeting" if "mode=meeting" in query.split("&") else "reminders"
             try:
                 n = int(self.headers.get("Content-Length") or 0)
             except ValueError:
@@ -199,15 +206,17 @@ def make_handler(app: App):
             body = self.rfile.read(n)
             fwd = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
             ip = fwd or self.client_address[0]
-            if self.path == "/transcribe":
-                code, obj = app.transcribe(body, ip)
+            if route == "/transcribe":
+                code, obj = app.transcribe(body, ip, mode)
             else:
                 try:
                     data = json.loads(body or b"{}")
                     text = data.get("text") if isinstance(data, dict) else None
+                    if isinstance(data, dict) and data.get("mode") in MODES:
+                        mode = data["mode"]
                 except ValueError:
                     text = None
-                code, obj = app.tasks_from_text(text, ip)
+                code, obj = app.tasks_from_text(text, ip, mode)
             self._json(code, obj)
 
         def log_message(self, *a):
