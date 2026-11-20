@@ -74,6 +74,18 @@ def speech_found(verbose: dict) -> bool:
     return not segs or any((s.get("no_speech_prob") or 0) < 0.6 for s in segs)
 
 
+def segment_info(verbose: dict) -> list[dict]:
+    """Per-segment text and a low-confidence flag from the model's own scores (no extra call)."""
+    out = []
+    for seg in verbose.get("segments") or []:
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        low = (seg.get("avg_logprob") is not None and seg["avg_logprob"] < -0.7) or (seg.get("compression_ratio") or 0) > 2.4
+        out.append({"start": round(seg.get("start") or 0, 1), "end": round(seg.get("end") or 0, 1), "text": text, "low": bool(low)})
+    return out
+
+
 class App:
     def __init__(self, client: Groq | None, limits: Limits | None = None):
         self.client = client
@@ -119,7 +131,7 @@ class App:
             return 502, {"error": "Something went wrong. Try again."}
         t2 = time.monotonic()
         return 200, {
-            "transcript": text, "empty": False, **result, "speech_model": STT_MODELS[0],
+            "transcript": text, "empty": False, **result, "speech_model": STT_MODELS[0], "segments": segment_info(verbose),
             "audio_seconds": round(verbose.get("duration") or 0, 1),
             "seconds": {"transcribe": round(t1 - t0, 1), "tasks": round(t2 - t1, 1), "total": round(t2 - t0, 1)},
         }

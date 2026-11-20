@@ -8,7 +8,7 @@ from pathlib import Path
 
 from voicetotasks import bench
 from voicetotasks.groq import Groq, GroqError
-from voicetotasks.server import App, Limits, Server, make_handler, sniff_audio, speech_found
+from voicetotasks.server import App, Limits, Server, make_handler, segment_info, sniff_audio, speech_found
 from voicetotasks.tasks import clean
 from voicetotasks.wer import bootstrap_ci, edit_distance, normalize, utterance_errors
 
@@ -74,6 +74,30 @@ class CleanTests(unittest.TestCase):
             out = clean(bad, "text")
             self.assertIn("tasks", out)
         self.assertEqual(len(clean({"tasks": [{"task": "t"}] * 50}, "t")["tasks"]), 12)
+
+
+class AdvancedTests(unittest.TestCase):
+    def test_priority_only_from_the_speakers_words(self):
+        parsed = {"summary": "", "tasks": [
+            {"task": "Send the invoice", "quote": "send the invoice asap"},
+            {"task": "Book flights", "quote": "book the flights"}]}
+        t = clean(parsed, "please send the invoice asap and book the flights")["tasks"]
+        self.assertEqual([x["priority"] for x in t], ["high", None])
+
+    def test_model_claimed_priority_is_ignored(self):
+        parsed = {"tasks": [{"task": "Call Sam", "quote": "call Sam", "priority": "high"}]}
+        self.assertIsNone(clean(parsed, "call Sam tomorrow")["tasks"][0]["priority"])
+
+    def test_ungrounded_urgent_quote_gets_no_priority(self):
+        parsed = {"tasks": [{"task": "Pay rent", "quote": "pay the rent urgently"}]}
+        self.assertIsNone(clean(parsed, "buy milk")["tasks"][0]["priority"])
+
+    def test_segment_confidence(self):
+        segs = segment_info({"segments": [
+            {"start": 0, "end": 2, "text": " hello there", "avg_logprob": -0.2, "compression_ratio": 1.1},
+            {"start": 2, "end": 4, "text": " mumbled bit", "avg_logprob": -1.2, "compression_ratio": 1.1},
+            {"start": 4, "end": 5, "text": "  ", "avg_logprob": -0.1}]})
+        self.assertEqual([(s["text"], s["low"]) for s in segs], [("hello there", False), ("mumbled bit", True)])
 
 
 class SniffTests(unittest.TestCase):
