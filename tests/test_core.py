@@ -77,20 +77,22 @@ class CleanTests(unittest.TestCase):
 
 
 class AdvancedTests(unittest.TestCase):
-    def test_priority_only_from_the_speakers_words(self):
-        parsed = {"summary": "", "tasks": [
-            {"task": "Send the invoice", "quote": "send the invoice asap"},
-            {"task": "Book flights", "quote": "book the flights"}]}
-        t = clean(parsed, "please send the invoice asap and book the flights")["tasks"]
-        self.assertEqual([x["priority"] for x in t], ["high", None])
+    def test_priority_needs_urgent_words_in_the_transcript(self):
+        t = "call Sam tomorrow it's urgent and send me the invoice by Friday"
+        parsed = {"tasks": [
+            {"task": "Call Sam", "quote": "call Sam tomorrow", "urgent_words": "it's urgent"},
+            {"task": "Send the invoice", "quote": "send me the invoice by Friday", "urgent_words": None}]}
+        self.assertEqual([x["priority"] for x in clean(parsed, t)["tasks"]], ["high", None])
 
-    def test_model_claimed_priority_is_ignored(self):
+    def test_invented_or_non_urgent_words_give_no_priority(self):
+        t = "call Sam tomorrow and book flights"
+        for words in ("it's urgent", "call Sam", "very important to me"):
+            parsed = {"tasks": [{"task": "Call Sam", "quote": "call Sam tomorrow", "urgent_words": words}]}
+            self.assertIsNone(clean(parsed, t)["tasks"][0]["priority"], words)
+
+    def test_model_claimed_priority_field_is_ignored(self):
         parsed = {"tasks": [{"task": "Call Sam", "quote": "call Sam", "priority": "high"}]}
         self.assertIsNone(clean(parsed, "call Sam tomorrow")["tasks"][0]["priority"])
-
-    def test_ungrounded_urgent_quote_gets_no_priority(self):
-        parsed = {"tasks": [{"task": "Pay rent", "quote": "pay the rent urgently"}]}
-        self.assertIsNone(clean(parsed, "buy milk")["tasks"][0]["priority"])
 
     def test_segment_confidence(self):
         segs = segment_info({"segments": [

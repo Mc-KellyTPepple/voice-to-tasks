@@ -20,7 +20,8 @@ SYSTEM = (
     '{"summary": string, "tasks": [{"task": string, "owner": string|null, "due": string|null, "quote": string}]}. '
     "Rules: list only things the speaker said need doing. Write each task as a short action starting with a verb. "
     "owner and due must be words the speaker actually said, otherwise null. quote must be copied word for word "
-    "from the transcript. If there are no tasks, return an empty list. The summary is one or two plain sentences."
+    "from the transcript. urgent_words are the exact words the speaker used to say that particular task is urgent "
+    "(for example \"it's urgent\" or \"asap\"), otherwise null; never infer urgency. If there are no tasks, return an empty list. The summary is one or two plain sentences."
 )
 
 
@@ -50,7 +51,9 @@ def clean(parsed: dict | None, transcript: str) -> dict:
             if due:
                 removed.append("due")
             due = None
-        priority = "high" if (URGENT.search(quote) and _contains(transcript, quote)) else None
+        # The model only says which task the urgent words belong to; the words themselves must be in the transcript and be urgency words.
+        words = item.get("urgent_words") if isinstance(item.get("urgent_words"), str) else ""
+        priority = "high" if (words and URGENT.search(words) and _contains(transcript, words)) else None
         tasks.append({
             "task": item["task"].strip()[:200],
             "owner": owner.strip() if owner else None,
